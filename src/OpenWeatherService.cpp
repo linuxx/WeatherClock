@@ -37,6 +37,25 @@ int findMatchingBrace(const String& text, int openPos) {
   return -1;
 }
 
+int findMatchingBracket(const String& text, int openPos) {
+  if (openPos < 0 || openPos >= static_cast<int>(text.length()) || text[openPos] != '[') {
+    return -1;
+  }
+
+  int depth = 0;
+  for (int i = openPos; i < static_cast<int>(text.length()); ++i) {
+    if (text[i] == '[') {
+      ++depth;
+    } else if (text[i] == ']') {
+      --depth;
+      if (depth == 0) {
+        return i;
+      }
+    }
+  }
+  return -1;
+}
+
 bool parseFieldNumberFlexible(const String& json, const char* fieldName, double& outValue) {
   if (fieldName == nullptr) {
     return false;
@@ -140,9 +159,6 @@ void logParsedWeather(const WeatherData& weather) {
   Serial.println("[OWM] -----------------------");
 }
 
-int dayKey(const tm& t) {
-  return (t.tm_year + 1900) * 1000 + t.tm_yday;
-}
 }  // namespace
 
 OpenWeatherService::OpenWeatherService(const OpenWeatherConfigService& configService)
@@ -336,103 +352,127 @@ bool OpenWeatherService::fetchWeatherByCoordinates(
   auto fetchOneCallPayload = [&](const char* exclude, const char* tag, String& outPayload) -> bool {
     const String url = String("https://api.openweathermap.org/data/3.0/onecall?lat=") + String(lat, 6) +
                        "&lon=" + String(lon, 6) + "&units=imperial&exclude=" + exclude + "&appid=" + apiKey;
-    Serial.print("[OWM] ");
-    Serial.print(tag);
-    Serial.print(" request: ");
-    Serial.println(url);
-
-    BearSSL::WiFiClientSecure client;
-    client.setInsecure();
-    HTTPClient http;
-    if (!http.begin(client, url)) {
+    for (int attempt = 1; attempt <= 2; ++attempt) {
       Serial.print("[OWM] ");
       Serial.print(tag);
-      Serial.println(" begin() failed");
-      return false;
-    }
+      Serial.print(" request (attempt ");
+      Serial.print(attempt);
+      Serial.print("): ");
+      Serial.println(url);
 
-    const char* headerKeys[] = {"Content-Type", "Content-Encoding", "Transfer-Encoding", "Content-Length"};
-    http.collectHeaders(headerKeys, 4);
-    http.useHTTP10(true);
-    http.addHeader("Accept-Encoding", "identity");
-    http.setTimeout(12000);
-    const int httpCode = http.GET();
-    if (httpCode != HTTP_CODE_OK) {
-      Serial.print("[OWM] ");
-      Serial.print(tag);
-      Serial.print(" HTTP error: ");
-      Serial.println(httpCode);
-      const String body = http.getString();
-      if (body.length() > 0) {
+      BearSSL::WiFiClientSecure client;
+      client.setInsecure();
+      // Larger RX buffer helps prevent truncated reads on larger OneCall payloads.
+      client.setBufferSizes(4096, 1024);
+
+      HTTPClient http;
+      if (!http.begin(client, url)) {
         Serial.print("[OWM] ");
         Serial.print(tag);
-        Serial.print(" response: ");
-        Serial.println(body);
+        Serial.println(" begin() failed");
+        return false;
       }
-      http.end();
-      return false;
-    }
 
-    Serial.print("[OWM] ");
-    Serial.print(tag);
-    Serial.print(" Content-Length: ");
-    Serial.println(http.header("Content-Length"));
-    Serial.print("[OWM] ");
-    Serial.print(tag);
-    Serial.print(" Content-Encoding: ");
-    Serial.println(http.header("Content-Encoding"));
-    Serial.print("[OWM] ");
-    Serial.print(tag);
-    Serial.print(" Transfer-Encoding: ");
-    Serial.println(http.header("Transfer-Encoding"));
-
-    outPayload = "";
-    outPayload.reserve(22000);
-    WiFiClient* stream = http.getStreamPtr();
-    const int contentLength = http.getSize();
-    unsigned long lastReadMs = millis();
-    while ((http.connected() || stream->available() > 0) && outPayload.length() < 22000) {
-      while (stream->available() > 0 && outPayload.length() < 22000) {
-        const int ch = stream->read();
-        if (ch < 0) {
-          break;
+      const char* headerKeys[] = {"Content-Type", "Content-Encoding", "Transfer-Encoding", "Content-Length"};
+      http.collectHeaders(headerKeys, 4);
+      http.useHTTP10(true);
+      http.addHeader("Accept-Encoding", "identity");
+      http.setTimeout(20000);
+      const int httpCode = http.GET();
+      if (httpCode != HTTP_CODE_OK) {
+        Serial.print("[OWM] ");
+        Serial.print(tag);
+        Serial.print(" HTTP error: ");
+        Serial.println(httpCode);
+        const String body = http.getString();
+        if (body.length() > 0) {
+          Serial.print("[OWM] ");
+          Serial.print(tag);
+          Serial.print(" response: ");
+          Serial.println(body);
         }
-        outPayload += static_cast<char>(ch);
-        lastReadMs = millis();
+        http.end();
+        if (attempt == 2) {
+          return false;
+        }
+        delay(200);
+        continue;
       }
 
-      if (contentLength > 0 && static_cast<int>(outPayload.length()) >= contentLength) {
-        break;
-      }
-      if (millis() - lastReadMs > 15000) {
-        break;
-      }
-      delay(1);
-    }
-
-    // Fallback path for edge cases where stream read produced nothing.
-    if (outPayload.length() == 0) {
-      outPayload = http.getString();
-    }
-    http.end();
-    Serial.print("[OWM] ");
-    Serial.print(tag);
-    Serial.print(" payload length=");
-    Serial.println(outPayload.length());
-    if (contentLength > 0 && outPayload.length() > 0 &&
-        static_cast<int>(outPayload.length()) != contentLength) {
+      const int contentLength = http.getSize();
       Serial.print("[OWM] ");
       Serial.print(tag);
-      Serial.print(" partial payload: got ");
-      Serial.print(outPayload.length());
-      Serial.print(" expected ");
-      Serial.println(contentLength);
+      Serial.print(" Content-Length: ");
+      Serial.println(http.header("Content-Length"));
+      Serial.print("[OWM] ");
+      Serial.print(tag);
+      Serial.print(" Content-Encoding: ");
+      Serial.println(http.header("Content-Encoding"));
+      Serial.print("[OWM] ");
+      Serial.print(tag);
+      Serial.print(" Transfer-Encoding: ");
+      Serial.println(http.header("Transfer-Encoding"));
+
+      constexpr int kMaxPayloadBytes = 30000;
+      outPayload = "";
+      if (contentLength > 0 && contentLength < kMaxPayloadBytes) {
+        outPayload.reserve(static_cast<unsigned int>(contentLength + 64));
+      } else {
+        outPayload.reserve(kMaxPayloadBytes);
+      }
+
+      WiFiClient* stream = http.getStreamPtr();
+      char buf[512];
+      unsigned long lastReadMs = millis();
+      while ((http.connected() || stream->available() > 0) && outPayload.length() < kMaxPayloadBytes) {
+        int available = stream->available();
+        if (available > 0) {
+          int toRead = available;
+          if (toRead > static_cast<int>(sizeof(buf))) {
+            toRead = static_cast<int>(sizeof(buf));
+          }
+          const size_t got = stream->readBytes(buf, static_cast<size_t>(toRead));
+          if (got > 0) {
+            outPayload.concat(buf, got);
+            lastReadMs = millis();
+          }
+        } else {
+          if (millis() - lastReadMs > 30000) {
+            break;
+          }
+          delay(1);
+        }
+      }
+      http.end();
+
+      Serial.print("[OWM] ");
+      Serial.print(tag);
+      Serial.print(" payload length=");
+      Serial.println(outPayload.length());
+
+      if (contentLength > 0 && outPayload.length() > 0 &&
+          static_cast<int>(outPayload.length()) != contentLength) {
+        Serial.print("[OWM] ");
+        Serial.print(tag);
+        Serial.print(" partial payload: got ");
+        Serial.print(outPayload.length());
+        Serial.print(" expected ");
+        Serial.println(contentLength);
+        if (attempt == 2) {
+          return false;
+        }
+        delay(200);
+        continue;
+      }
+
+      return outPayload.length() > 0;
     }
-    return outPayload.length() > 0;
+
+    return false;
   };
 
   String corePayload;
-  if (!fetchOneCallPayload("minutely,daily", "OneCall(core)", corePayload)) {
+  if (!fetchOneCallPayload("minutely,alerts", "OneCall(core)", corePayload)) {
     return false;
   }
 
@@ -477,7 +517,6 @@ bool OpenWeatherService::fetchWeatherByCoordinates(
   const int currentPos = findSection(corePayload, "\"current\":");
   double currentTemp = 0;
   int currentId = 0;
-  int currentDt = 0;
   const int currentStart = (currentPos >= 0) ? currentPos : 0;
   if (!parseNumberFrom(corePayload, "\"temp\":", currentStart, currentTemp, nullptr) ||
       !(parseIntFrom(corePayload, "\"weather\":[{\"id\":", currentStart, currentId, nullptr) ||
@@ -498,28 +537,6 @@ bool OpenWeatherService::fetchWeatherByCoordinates(
   }
   weather.todayHighF = weather.temperatureF;
   weather.todayLowF = weather.temperatureF;
-  parseIntFrom(corePayload, "\"dt\":", currentStart, currentDt, nullptr);
-  if (currentDt <= 0) {
-    currentDt = static_cast<int>(time(nullptr));
-  }
-
-  time_t localCurrent = static_cast<time_t>(currentDt + timezoneOffsetSec);
-  tm curInfo{};
-  gmtime_r(&localCurrent, &curInfo);
-  int targetDayKeys[4] = {0, 0, 0, 0};
-  for (int i = 0; i < 4; ++i) {
-    const time_t target = localCurrent + static_cast<time_t>((i + 1) * 86400);
-    tm ti{};
-    gmtime_r(&target, &ti);
-    targetDayKeys[i] = dayKey(ti);
-  }
-
-  int16_t hourlyAggHigh[4] = {-32768, -32768, -32768, -32768};
-  int16_t hourlyAggLow[4] = {32767, 32767, 32767, 32767};
-  uint8_t hourlyAggCount[4] = {0, 0, 0, 0};
-  WeatherType hourlyAggType[4] = {weather.type, weather.type, weather.type, weather.type};
-  char hourlyAggMain[4][12] = {"", "", "", ""};
-
   double windSpeed = 0;
   if (parseNumberFrom(corePayload, "\"wind_speed\":", currentStart, windSpeed, nullptr)) {
     weather.windMph = static_cast<uint8_t>(roundToInt(windSpeed));
@@ -601,37 +618,7 @@ bool OpenWeatherService::fetchWeatherByCoordinates(
         selected++;
       }
 
-      const time_t localHourEpoch = static_cast<time_t>(dt + timezoneOffsetSec);
-      tm localHourTm{};
-      gmtime_r(&localHourEpoch, &localHourTm);
-      const int key = dayKey(localHourTm);
-      for (int d = 0; d < 4; ++d) {
-        if (key == targetDayKeys[d]) {
-          const int16_t t = static_cast<int16_t>(roundToInt(hourTemp));
-          if (t > hourlyAggHigh[d]) hourlyAggHigh[d] = t;
-          if (t < hourlyAggLow[d]) hourlyAggLow[d] = t;
-          if (hourlyAggCount[d] == 0) {
-            hourlyAggType[d] = mapWeatherType(hourId);
-            strncpy(hourlyAggMain[d], hourMain, sizeof(hourlyAggMain[d]) - 1);
-            hourlyAggMain[d][sizeof(hourlyAggMain[d]) - 1] = '\0';
-          }
-          hourlyAggCount[d]++;
-          break;
-        }
-      }
-
       hourlyIndex++;
-    }
-
-    for (int d = 0; d < 4; ++d) {
-      Serial.print("[OWM] HourlyAgg[");
-      Serial.print(d);
-      Serial.print("] count=");
-      Serial.print(hourlyAggCount[d]);
-      Serial.print(" hi=");
-      Serial.print(hourlyAggHigh[d]);
-      Serial.print(" lo=");
-      Serial.println(hourlyAggLow[d]);
     }
   }
 
@@ -646,50 +633,114 @@ bool OpenWeatherService::fetchWeatherByCoordinates(
     weather.advisory[sizeof(weather.advisory) - 1] = '\0';
   }
 
-  // Release large core payload before second HTTPS request to avoid heap pressure.
-  corePayload = "";
+  // Parse daily directly from the same OneCall payload, preserving order.
+  struct ParsedDailyItem {
+    uint8_t dow;
+    int16_t high;
+    int16_t low;
+    WeatherType type;
+    char main[12];
+  };
+  ParsedDailyItem parsedDaily[8]{};
+  int parsedDailyCount = 0;
 
-  Serial.println("[OWM] Skipping second OneCall(daily) request to avoid ESP8266 TLS crash");
+  const int dailyKeyPos = findSection(corePayload, "\"daily\":");
+  if (dailyKeyPos >= 0) {
+    const int arrayStart = corePayload.indexOf('[', dailyKeyPos);
+    const int arrayEnd = findMatchingBracket(corePayload, arrayStart);
+    if (arrayStart >= 0 && arrayEnd > arrayStart) {
+      int parsePos = arrayStart + 1;
+      while (parsePos < arrayEnd && parsedDailyCount < 8) {
+        const int objStart = corePayload.indexOf('{', parsePos);
+        if (objStart < 0 || objStart > arrayEnd) {
+          break;
+        }
+        const int objEnd = findMatchingBrace(corePayload, objStart);
+        if (objEnd < 0 || objEnd > arrayEnd) {
+          break;
+        }
+        const String dayJson = corePayload.substring(objStart, objEnd + 1);
+        parsePos = objEnd + 1;
 
-  // Build 4-day values from hourly aggregation (tomorrow + next 3 days).
-  for (int i = 0; i < 4; ++i) {
-    if (hourlyAggCount[i] > 0) {
-      weather.dailyHighF[i] = hourlyAggHigh[i];
-      weather.dailyLowF[i] = hourlyAggLow[i];
-      weather.dailyType[i] = hourlyAggType[i];
-      if (hourlyAggMain[i][0] != '\0') {
-        strncpy(weather.dailyMain[i], hourlyAggMain[i], sizeof(weather.dailyMain[i]) - 1);
-        weather.dailyMain[i][sizeof(weather.dailyMain[i]) - 1] = '\0';
+        int dt = 0;
+        if (!parseIntFrom(dayJson, "\"dt\":", 0, dt, nullptr)) {
+          continue;
+        }
+
+        double maxTemp = currentTemp;
+        double minTemp = currentTemp;
+        bool hasMax = false;
+        bool hasMin = false;
+        const int tempKeyPos = dayJson.indexOf("\"temp\":");
+        if (tempKeyPos >= 0) {
+          const int tempObjStart = dayJson.indexOf('{', tempKeyPos);
+          if (tempObjStart >= 0) {
+            const int tempObjEnd = findMatchingBrace(dayJson, tempObjStart);
+            if (tempObjEnd > tempObjStart) {
+              const String tempJson = dayJson.substring(tempObjStart, tempObjEnd + 1);
+              hasMax = parseFieldNumberFlexible(tempJson, "\"max\"", maxTemp);
+              hasMin = parseFieldNumberFlexible(tempJson, "\"min\"", minTemp);
+            }
+          }
+        }
+        if (!hasMax) {
+          parseFieldNumberFlexible(dayJson, "\"day\"", maxTemp);
+        }
+        if (!hasMin) {
+          parseFieldNumberFlexible(dayJson, "\"night\"", minTemp);
+        }
+
+        int dayId = currentId;
+        parseIntFrom(dayJson, "\"id\":", 0, dayId, nullptr);
+
+        time_t localDt = static_cast<time_t>(dt + timezoneOffsetSec);
+        tm localInfo{};
+        gmtime_r(&localDt, &localInfo);
+        parsedDaily[parsedDailyCount].dow = static_cast<uint8_t>(localInfo.tm_wday);
+        parsedDaily[parsedDailyCount].high = static_cast<int16_t>(roundToInt(maxTemp));
+        parsedDaily[parsedDailyCount].low = static_cast<int16_t>(roundToInt(minTemp));
+        parsedDaily[parsedDailyCount].type = mapWeatherType(dayId);
+        parsedDaily[parsedDailyCount].main[0] = '\0';
+        parseStringFrom(
+            dayJson, "\"main\":\"", 0, parsedDaily[parsedDailyCount].main,
+            sizeof(parsedDaily[parsedDailyCount].main), nullptr);
+        ++parsedDailyCount;
       }
     }
   }
 
-  // Final safety fill to prevent 0/0 even if daily and hourly aggregation are both unavailable.
+  // Today card comes from daily[0] when available.
+  if (parsedDailyCount > 0) {
+    weather.todayHighF = parsedDaily[0].high;
+    weather.todayLowF = parsedDaily[0].low;
+  }
+
+  if (parsedDailyCount < 5) {
+    Serial.print("[OWM] Insufficient daily JSON entries. parsedDailyCount=");
+    Serial.println(parsedDailyCount);
+    return false;
+  }
+
+  // 4-day page should be tomorrow..+3 => daily[1..4].
+  int dailyPageFilled = 0;
+  const int startIndex = 1;
   for (int i = 0; i < 4; ++i) {
-    weather.dailyDow[i] = static_cast<uint8_t>((curInfo.tm_wday + i + 1) % 7);
-    if (weather.dailyHighF[i] == 0 && weather.dailyLowF[i] == 0) {
-      if (i > 0 && weather.dailyHighF[i - 1] != 0 && weather.dailyLowF[i - 1] != 0) {
-        // Continue a simple trend so rows are not identical when source data is missing.
-        int16_t prevHigh = weather.dailyHighF[i - 1];
-        int16_t prevLow = weather.dailyLowF[i - 1];
-        weather.dailyHighF[i] = static_cast<int16_t>(prevHigh + ((i % 2) ? 2 : -1));
-        weather.dailyLowF[i] = static_cast<int16_t>(prevLow + ((i % 2) ? 1 : -2));
-        if (weather.dailyLowF[i] > weather.dailyHighF[i]) {
-          weather.dailyLowF[i] = weather.dailyHighF[i];
-        }
-        weather.dailyType[i] = weather.dailyType[i - 1];
-        strncpy(weather.dailyMain[i], weather.dailyMain[i - 1], sizeof(weather.dailyMain[i]) - 1);
-        weather.dailyMain[i][sizeof(weather.dailyMain[i]) - 1] = '\0';
-      } else {
-        weather.dailyHighF[i] = weather.temperatureF;
-        weather.dailyLowF[i] = weather.temperatureF;
-        weather.dailyType[i] = weather.type;
-        if (weather.dailyMain[i][0] == '\0') {
-          strncpy(weather.dailyMain[i], weather.hourlyMain[0], sizeof(weather.dailyMain[i]) - 1);
-          weather.dailyMain[i][sizeof(weather.dailyMain[i]) - 1] = '\0';
-        }
-      }
+    const int srcIdx = startIndex + i;
+    if (srcIdx >= parsedDailyCount) {
+      break;
     }
+    weather.dailyDow[i] = parsedDaily[srcIdx].dow;
+    weather.dailyHighF[i] = parsedDaily[srcIdx].high;
+    weather.dailyLowF[i] = parsedDaily[srcIdx].low;
+    weather.dailyType[i] = parsedDaily[srcIdx].type;
+    strncpy(weather.dailyMain[i], parsedDaily[srcIdx].main, sizeof(weather.dailyMain[i]) - 1);
+    weather.dailyMain[i][sizeof(weather.dailyMain[i]) - 1] = '\0';
+    ++dailyPageFilled;
+  }
+  if (dailyPageFilled < 4) {
+    Serial.print("[OWM] Failed to populate 4-day rows from JSON. filled=");
+    Serial.println(dailyPageFilled);
+    return false;
   }
 
   weather.valid = true;

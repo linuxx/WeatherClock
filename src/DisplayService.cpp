@@ -379,6 +379,16 @@ void DisplayService::drawWindPage(const WeatherData& weather) {
   display_.drawLine(cx, cy, ex, ey, SSD1306_WHITE);
   display_.drawLine(ex, ey, bx + px, by + py, SSD1306_WHITE);
   display_.drawLine(ex, ey, bx - px, by - py, SSD1306_WHITE);
-  display_.setCursor(94, 44);
-  display_.print(windDirectionLabel(weather.windDeg));
+  const char* dirLabel = windDirectionLabel(weather.windDeg);
+  int16_t x1 = 0;
+  int16_t y1 = 0;
+  uint16_t w = 0;
+  uint16_t h = 0;
+  display_.getTextBounds(dirLabel, 0, 0, &x1, &y1, &w, &h);
+  int16_t labelX = cx - static_cast<int16_t>(w / 2);
+  if (labelX < 0) {
+    labelX = 0;
+  }
+  display_.setCursor(labelX, 44);
+  display_.print(dirLabel);
 }
