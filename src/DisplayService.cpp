@@ -31,6 +31,7 @@ String DisplayService::formatHourLabel(uint8_t hour24) {
 }
 
 namespace {
+// Current local hour from system clock (already adjusted via UTC offset in TimeService).
 uint8_t currentLocalHour24() {
   time_t now = time(nullptr);
   tm localNow{};
@@ -45,6 +46,7 @@ uint8_t currentLocalWday() {
   return static_cast<uint8_t>(localNow.tm_wday);
 }
 
+// Picks which precomputed hourly slot is nearest to "now + 2h".
 uint8_t pickHourlyStartIndex(const WeatherData& weather) {
   const uint8_t targetHour = static_cast<uint8_t>((currentLocalHour24() + 2) % 24);
   uint8_t bestIndex = 0;
@@ -60,6 +62,7 @@ uint8_t pickHourlyStartIndex(const WeatherData& weather) {
   return bestIndex;
 }
 
+// Picks daily slot that matches tomorrow's weekday.
 uint8_t pickDailyStartIndex(const WeatherData& weather) {
   const uint8_t tomorrowWday = static_cast<uint8_t>((currentLocalWday() + 1) % 7);
   for (uint8_t i = 0; i < 4; ++i) {
@@ -202,6 +205,7 @@ void DisplayService::drawTopBand(const ClockData& clock, bool showColon) {
     return;
   }
 
+  // 12-hour clock with blinking colon controlled by caller.
   char timeBuf[6];
   const uint8_t hour12 = (clock.hour % 12 == 0) ? 12 : (clock.hour % 12);
   const unsigned minute = static_cast<unsigned>(clock.minute % 60);
@@ -212,6 +216,7 @@ void DisplayService::drawTopBand(const ClockData& clock, bool showColon) {
   display_.setCursor(2, 0);
   display_.print(timeBuf);
 
+  // Compact date at top-right.
   char dateBuf[6];
   const unsigned month = static_cast<unsigned>(clock.month % 100);
   const unsigned day = static_cast<unsigned>(clock.day % 100);
@@ -227,6 +232,7 @@ void DisplayService::drawBottomBand(const WeatherData& weather) {
   const int16_t textRegionRight = kScreenWidth - 1;
   const int16_t textRegionWidth = textRegionRight - textRegionLeft + 1;
 
+  // Utility to center a text string in the right-hand weather text column.
   auto centeredXForText = [&](const char* text) -> int16_t {
     int16_t x1 = 0;
     int16_t y1 = 0;
@@ -305,6 +311,7 @@ void DisplayService::drawTodayPage(const WeatherData& weather) {
 
 void DisplayService::drawHourlyPage(const WeatherData& weather) {
   display_.setTextSize(1);
+  // Rotates rows so first entry starts at +2h from current local time.
   const uint8_t start = pickHourlyStartIndex(weather);
   for (int i = 0; i < 4; ++i) {
     const uint8_t idx = static_cast<uint8_t>((start + i) % 4);
@@ -325,6 +332,7 @@ void DisplayService::drawHourlyPage(const WeatherData& weather) {
 
 void DisplayService::drawFourDayPage(const WeatherData& weather) {
   display_.setTextSize(1);
+  // Rows represent tomorrow through +3 days.
   const uint8_t start = pickDailyStartIndex(weather);
   const uint8_t baseWday = static_cast<uint8_t>((currentLocalWday() + 1) % 7);
   for (int i = 0; i < 4; ++i) {
@@ -366,6 +374,7 @@ void DisplayService::drawWindPage(const WeatherData& weather) {
   display_.print(weather.gustMph);
   display_.print(" mph");
 
+  // Direction indicator drawn as vector on a compass ring.
   const int16_t cx = 101;
   const int16_t cy = 30;
   const int16_t ex = cx + dx[idx];

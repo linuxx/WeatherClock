@@ -4,6 +4,7 @@
 #include <Adafruit_SSD1306.h>
 
 namespace {
+// Draws a simple sun glyph with a filled center and short cardinal rays.
 void drawSun(Adafruit_GFX& d, int16_t x, int16_t y) {
   d.fillCircle(x + 12, y + 12, 6, SSD1306_WHITE);
   d.drawLine(x + 12, y + 2, x + 12, y + 0, SSD1306_WHITE);
@@ -12,6 +13,7 @@ void drawSun(Adafruit_GFX& d, int16_t x, int16_t y) {
   d.drawLine(x + 24, y + 12, x + 22, y + 12, SSD1306_WHITE);
 }
 
+// Draws a compact cloud shape using rounded rect + overlapping circles.
 void drawCloud(Adafruit_GFX& d, int16_t x, int16_t y) {
   d.fillRoundRect(x + 10, y + 12, 24, 10, 4, SSD1306_WHITE);
   d.fillCircle(x + 14, y + 12, 5, SSD1306_WHITE);
@@ -19,28 +21,33 @@ void drawCloud(Adafruit_GFX& d, int16_t x, int16_t y) {
   d.fillCircle(x + 31, y + 12, 5, SSD1306_WHITE);
 }
 
+// Draws three diagonal rain streaks below the cloud.
 void drawRainDrops(Adafruit_GFX& d, int16_t x, int16_t y) {
   d.drawLine(x + 14, y + 24, x + 12, y + 28, SSD1306_WHITE);
   d.drawLine(x + 22, y + 24, x + 20, y + 28, SSD1306_WHITE);
   d.drawLine(x + 30, y + 24, x + 28, y + 28, SSD1306_WHITE);
 }
 
+// Draws three small snow flake dots below the cloud.
 void drawSnow(Adafruit_GFX& d, int16_t x, int16_t y) {
   d.drawCircle(x + 13, y + 26, 2, SSD1306_WHITE);
   d.drawCircle(x + 22, y + 28, 2, SSD1306_WHITE);
   d.drawCircle(x + 30, y + 26, 2, SSD1306_WHITE);
 }
 
+// Draws a stylized lightning bolt under the cloud.
 void drawLightning(Adafruit_GFX& d, int16_t x, int16_t y) {
   d.fillTriangle(x + 21, y + 22, x + 16, y + 30, x + 21, y + 30, SSD1306_WHITE);
   d.fillTriangle(x + 21, y + 30, x + 26, y + 24, x + 22, y + 24, SSD1306_WHITE);
 }
 
+// Draws horizontal fog lines beneath the cloud.
 void drawFogLines(Adafruit_GFX& d, int16_t x, int16_t y) {
   d.drawLine(x + 8, y + 24, x + 34, y + 24, SSD1306_WHITE);
   d.drawLine(x + 6, y + 28, x + 36, y + 28, SSD1306_WHITE);
 }
 
+// Draws a simple multi-line wind glyph.
 void drawWind(Adafruit_GFX& d, int16_t x, int16_t y) {
   d.drawLine(x + 6, y + 10, x + 28, y + 10, SSD1306_WHITE);
   d.drawLine(x + 10, y + 16, x + 34, y + 16, SSD1306_WHITE);
@@ -48,6 +55,7 @@ void drawWind(Adafruit_GFX& d, int16_t x, int16_t y) {
 }
 }  // namespace
 
+// Converts WeatherType enum into UI-friendly text label.
 const char* weatherTypeLabel(WeatherType type) {
   switch (type) {
     case WeatherType::Clear:
@@ -72,6 +80,7 @@ const char* weatherTypeLabel(WeatherType type) {
   return "Unknown";
 }
 
+// Renders the weather icon composition for a given WeatherType.
 void drawWeatherIcon(Adafruit_GFX& display, WeatherType type, int16_t x, int16_t y) {
   switch (type) {
     case WeatherType::Clear:
@@ -108,4 +117,3 @@ void drawWeatherIcon(Adafruit_GFX& display, WeatherType type, int16_t x, int16_t
       break;
   }
 }
-

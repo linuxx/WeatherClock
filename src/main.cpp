@@ -10,6 +10,7 @@
 #include "TimeService.h"
 
 namespace {
+// Display and UI timing constants.
 constexpr uint8_t SCREEN_WIDTH = 128;
 constexpr uint8_t SCREEN_HEIGHT = 64;
 constexpr int8_t OLED_RESET = -1;
@@ -34,7 +35,6 @@ uint8_t networkAnimFrame = 0;
 bool webPortalRunning = false;
 bool pendingConfigSync = false;
 DisplayService* configPortalDisplay = nullptr;
-OpenWeatherConfigService* openWeatherConfigServiceCallback = nullptr;
 
 ClockData clockData{12, 0, 1, 1, false};
 WeatherData currentWeather{
@@ -52,6 +52,7 @@ WeatherData currentWeather{
     false};
 
 String buildDeviceName() {
+  // Use last 2 MAC bytes for a short unique suffix.
   uint8_t mac[6];
   WiFi.macAddress(mac);
   char suffix[5];
@@ -64,13 +65,11 @@ void showSyncStatus(const char* title, const String& line1, const String& line2,
 
 void onParamsSaved() {
   Serial.println("[CFG] Params saved from portal");
-  if (openWeatherConfigServiceCallback != nullptr) {
-    openWeatherConfigServiceCallback->applyFromConfig();
-    Serial.print("[CFG] ZIP='");
-    Serial.print(openWeatherConfigServiceCallback->zipCode());
-    Serial.print("' API key length=");
-    Serial.println(static_cast<int>(strlen(openWeatherConfigServiceCallback->apiKey())));
-  }
+  openWeatherConfigService.applyFromConfig();
+  Serial.print("[CFG] ZIP='");
+  Serial.print(openWeatherConfigService.zipCode());
+  Serial.print("' API key length=");
+  Serial.println(static_cast<int>(strlen(openWeatherConfigService.apiKey())));
   timeService.refreshClockData(clockData);
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -83,12 +82,14 @@ void onParamsSaved() {
 }
 
 void clearSavedAppSettings() {
+  // Clear both network credentials and app-level OpenWeather settings.
   wifiManager.resetSettings();
   WiFi.disconnect(true);
   openWeatherConfigService.clearSaved();
 }
 
 bool shouldEnterFactoryResetFromButton() {
+  // Hold reset button during boot countdown to wipe credentials/settings.
   pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
 
   const unsigned long start = millis();
@@ -121,6 +122,7 @@ bool shouldEnterFactoryResetFromButton() {
 }
 
 bool performHourlySync() {
+  // Sync NTP first, then weather. Keep one combined status for the UI.
   Serial.println("[SYNC] Starting hourly sync");
   networkBusy = true;
   const bool ntpSynced = timeService.syncFromNtp();
@@ -155,6 +157,7 @@ void showSyncStatus(const char* title, const String& line1, const String& line2,
 }
 
 bool handlePageButtonClick(unsigned long now, uint8_t& pageIndex, unsigned long& lastPageInteractionMs) {
+  // Debounced button click: LOW edge advances page.
   static int lastRawState = HIGH;
   static int stableState = HIGH;
   static unsigned long lastDebounceMs = 0;
@@ -219,7 +222,6 @@ void setup() {
   configPortalDisplay = &displayService;
   openWeatherConfigService.load();
   openWeatherConfigService.configurePortal(wifiManager);
-  openWeatherConfigServiceCallback = &openWeatherConfigService;
 
   wifiManager.setAPCallback(onConfigPortalStart);
   wifiManager.setSaveParamsCallback(onParamsSaved);
@@ -233,7 +235,7 @@ void setup() {
   bool connected = false;
   if (shouldEnterFactoryResetFromButton()) {
     Serial.println("[BOOT] Reset button pressed, entering config portal");
-    displayService.drawStatusScreen("Reset", "Clearing WiFi + TZ", "Starting config", portalSsid);
+    displayService.drawStatusScreen("Reset", "Clearing WiFi + app cfg", "Starting config", portalSsid);
     clearSavedAppSettings();
     connected = wifiManager.startConfigPortal(portalSsid.c_str());
   } else {

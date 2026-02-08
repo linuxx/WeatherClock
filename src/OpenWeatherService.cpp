@@ -8,6 +8,7 @@
 #include <time.h>
 
 namespace {
+// Converts probability [0..1] into integer percent [0..100].
 int clampToPercent(double pop) {
   if (pop < 0) {
     pop = 0;
@@ -18,6 +19,7 @@ int clampToPercent(double pop) {
   return static_cast<int>(pop * 100.0 + 0.5);
 }
 
+// Finds the matching closing brace index for an object starting at openPos.
 int findMatchingBrace(const String& text, int openPos) {
   if (openPos < 0 || openPos >= static_cast<int>(text.length()) || text[openPos] != '{') {
     return -1;
@@ -37,6 +39,7 @@ int findMatchingBrace(const String& text, int openPos) {
   return -1;
 }
 
+// Finds the matching closing bracket index for an array starting at openPos.
 int findMatchingBracket(const String& text, int openPos) {
   if (openPos < 0 || openPos >= static_cast<int>(text.length()) || text[openPos] != '[') {
     return -1;
@@ -56,6 +59,7 @@ int findMatchingBracket(const String& text, int openPos) {
   return -1;
 }
 
+// Reads a numeric field allowing optional whitespace after ':'.
 bool parseFieldNumberFlexible(const String& json, const char* fieldName, double& outValue) {
   if (fieldName == nullptr) {
     return false;
@@ -96,6 +100,7 @@ bool parseFieldNumberFlexible(const String& json, const char* fieldName, double&
   return true;
 }
 
+// Emits a normalized summary of parsed weather fields for serial debugging.
 void logParsedWeather(const WeatherData& weather) {
   Serial.println("[OWM] ---- Parsed Weather ----");
   Serial.print("[OWM] Current: temp=");
@@ -161,28 +166,34 @@ void logParsedWeather(const WeatherData& weather) {
 
 }  // namespace
 
+// Initializes parser/fetch service with config source and empty derived state.
 OpenWeatherService::OpenWeatherService(const OpenWeatherConfigService& configService)
     : configService_(configService) {
   lastLocationName_[0] = '\0';
   detectedUtcOffsetSeconds_ = 0;
 }
 
+// Finds a JSON section by key and returns its index or -1.
 int OpenWeatherService::findSection(const String& json, const char* sectionKey) {
   return json.indexOf(sectionKey);
 }
 
+// Rounds floating-point value to nearest integer using half-away-from-zero behavior.
 int OpenWeatherService::roundToInt(double value) {
   return static_cast<int>(value + (value >= 0 ? 0.5 : -0.5));
 }
 
+// Parses a numeric field from the root payload.
 bool OpenWeatherService::parseNumber(const String& json, const char* key, double& outValue) {
   return parseNumberFrom(json, key, 0, outValue, nullptr);
 }
 
+// Parses an integer field from the root payload.
 bool OpenWeatherService::parseInt(const String& json, const char* key, int& outValue) {
   return parseIntFrom(json, key, 0, outValue, nullptr);
 }
 
+// Parses a numeric field by key from an offset and optionally returns end position.
 bool OpenWeatherService::parseNumberFrom(
     const String& json, const char* key, int start, double& outValue, int* valuePos) {
   if (key == nullptr || start < 0) {
@@ -225,6 +236,7 @@ bool OpenWeatherService::parseNumberFrom(
   return true;
 }
 
+// Parses an integer field by key from an offset and optionally returns end position.
 bool OpenWeatherService::parseIntFrom(const String& json, const char* key, int start, int& outValue, int* valuePos) {
   double parsed = 0;
   if (!parseNumberFrom(json, key, start, parsed, valuePos)) {
@@ -234,6 +246,7 @@ bool OpenWeatherService::parseIntFrom(const String& json, const char* key, int s
   return true;
 }
 
+// Parses a quoted string field by key from an offset.
 bool OpenWeatherService::parseStringFrom(
     const String& json, const char* key, int start, char* outBuf, size_t outBufSize, int* valuePos) {
   if (key == nullptr || outBuf == nullptr || outBufSize == 0 || start < 0) {
@@ -267,6 +280,7 @@ bool OpenWeatherService::parseStringFrom(
   return true;
 }
 
+// Maps OpenWeather condition codes to local icon/text weather categories.
 WeatherType OpenWeatherService::mapWeatherType(int weatherId) {
   if (weatherId >= 200 && weatherId < 300) {
     return WeatherType::Thunderstorm;
@@ -292,6 +306,7 @@ WeatherType OpenWeatherService::mapWeatherType(int weatherId) {
   return WeatherType::Cloudy;
 }
 
+// Resolves configured ZIP code into latitude/longitude through OpenWeather geocoding.
 bool OpenWeatherService::fetchCoordinatesForZip(
     const char* zipInput, const char* apiKey, double& lat, double& lon, ProgressCallback progress) const {
   if (progress != nullptr) {
@@ -344,11 +359,13 @@ bool OpenWeatherService::fetchCoordinatesForZip(
   return true;
 }
 
+// Fetches and parses OneCall payload into display model fields.
 bool OpenWeatherService::fetchWeatherByCoordinates(
     double lat, double lon, const char* apiKey, WeatherData& weather, ProgressCallback progress) const {
   if (progress != nullptr) {
     progress("Weather API", String("Getting weather for"), String(lastLocationName_), "");
   }
+  // Small helper that fetches a OneCall payload with retry + full-length validation.
   auto fetchOneCallPayload = [&](const char* exclude, const char* tag, String& outPayload) -> bool {
     const String url = String("https://api.openweathermap.org/data/3.0/onecall?lat=") + String(lat, 6) +
                        "&lon=" + String(lon, 6) + "&units=imperial&exclude=" + exclude + "&appid=" + apiKey;
@@ -362,7 +379,7 @@ bool OpenWeatherService::fetchWeatherByCoordinates(
 
       BearSSL::WiFiClientSecure client;
       client.setInsecure();
-      // Larger RX buffer helps prevent truncated reads on larger OneCall payloads.
+      // Larger RX buffer helps prevent truncated reads on larger payloads.
       client.setBufferSizes(4096, 1024);
 
       HTTPClient http;
@@ -572,7 +589,7 @@ bool OpenWeatherService::fetchWeatherByCoordinates(
 
   const int hourlyPos = findSection(corePayload, "\"hourly\":");
   if (hourlyPos >= 0) {
-    // Precip probability from first hourly entry.
+      // Precip probability from first hourly entry.
     double pop = 0;
     if (parseNumberFrom(corePayload, "\"pop\":", hourlyPos, pop, nullptr)) {
       weather.rainChancePct = static_cast<uint8_t>(clampToPercent(pop));
@@ -633,7 +650,7 @@ bool OpenWeatherService::fetchWeatherByCoordinates(
     weather.advisory[sizeof(weather.advisory) - 1] = '\0';
   }
 
-  // Parse daily directly from the same OneCall payload, preserving order.
+  // Parse daily directly from the same OneCall payload, preserving array order.
   struct ParsedDailyItem {
     uint8_t dow;
     int16_t high;
@@ -758,6 +775,7 @@ bool OpenWeatherService::fetchWeatherByCoordinates(
   return true;
 }
 
+// Runs full refresh flow: validate config, geocode ZIP, fetch weather payload.
 bool OpenWeatherService::refreshWeather(WeatherData& weather, ProgressCallback progress) const {
   const char* zip = configService_.zipCode();
   const char* apiKey = configService_.apiKey();
@@ -788,10 +806,12 @@ bool OpenWeatherService::refreshWeather(WeatherData& weather, ProgressCallback p
   return true;
 }
 
+// Returns last successfully resolved location label.
 const char* OpenWeatherService::lastLocationName() const {
   return lastLocationName_;
 }
 
+// Returns API timezone offset (seconds east of UTC) from last successful parse.
 int32_t OpenWeatherService::detectedUtcOffsetSeconds() const {
   return detectedUtcOffsetSeconds_;
 }

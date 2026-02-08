@@ -3,19 +3,32 @@
 #include <Arduino.h>
 #include <time.h>
 
+/**
+ * Initialize local offset to UTC until weather API offset is applied.
+ */
 TimeService::TimeService() : utcOffsetSeconds_(0) {}
 
+/**
+ * Store UTC offset (seconds) used for local-time conversion.
+ */
 void TimeService::setUtcOffsetSeconds(int32_t offsetSeconds) {
   utcOffsetSeconds_ = offsetSeconds;
   Serial.print("[TIME] UTC offset set to seconds: ");
   Serial.println(utcOffsetSeconds_);
 }
 
+/**
+ * Return currently configured UTC offset in seconds.
+ */
 int32_t TimeService::utcOffsetSeconds() const {
   return utcOffsetSeconds_;
 }
 
+/**
+ * Synchronize system UTC time from pool NTP servers.
+ */
 bool TimeService::syncFromNtp() {
+  // Two attempts with overlapping pool servers improves cold-boot reliability.
   Serial.println("[TIME] Starting NTP sync (attempt 1)");
   configTime(0, 0, "0.us.pool.ntp.org", "1.us.pool.ntp.org", "2.us.pool.ntp.org");
   const unsigned long firstAttemptStart = millis();
@@ -40,6 +53,9 @@ bool TimeService::syncFromNtp() {
   return ok;
 }
 
+/**
+ * Refresh clock fields by converting current UTC epoch into local time.
+ */
 bool TimeService::refreshClockData(ClockData& clock) const {
   const time_t utcNow = time(nullptr);
   if (utcNow < 8 * 3600 * 2) {
@@ -48,6 +64,7 @@ bool TimeService::refreshClockData(ClockData& clock) const {
     return false;
   }
 
+  // Convert to local time by applying OpenWeather-provided UTC offset.
   const time_t localNow = utcNow + utcOffsetSeconds_;
   tm timeInfo{};
   gmtime_r(&localNow, &timeInfo);

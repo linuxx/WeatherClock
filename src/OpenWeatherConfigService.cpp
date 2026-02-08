@@ -2,6 +2,9 @@
 
 #include <string.h>
 
+/**
+ * Construct persistent ZIP/API-key config service and bind parameter buffers.
+ */
 OpenWeatherConfigService::OpenWeatherConfigService()
     : zipCodeValue_{0},
       apiKeyValue_{0},
@@ -11,6 +14,9 @@ OpenWeatherConfigService::OpenWeatherConfigService()
   apiKeyValue_[0] = '\0';
 }
 
+/**
+ * Ensure LittleFS is mounted once before file operations.
+ */
 bool OpenWeatherConfigService::ensureFsMounted() {
   if (fsMounted_) {
     return true;
@@ -19,6 +25,9 @@ bool OpenWeatherConfigService::ensureFsMounted() {
   return fsMounted_;
 }
 
+/**
+ * Load a trimmed text value from LittleFS into fixed-size output buffer.
+ */
 bool OpenWeatherConfigService::loadFromFs(const char* filePath, char* output, size_t outputSize) {
   if (!ensureFsMounted() || filePath == nullptr || output == nullptr || outputSize == 0 || !LittleFS.exists(filePath)) {
     return false;
@@ -36,6 +45,9 @@ bool OpenWeatherConfigService::loadFromFs(const char* filePath, char* output, si
   return output[0] != '\0';
 }
 
+/**
+ * Persist a text value to LittleFS.
+ */
 void OpenWeatherConfigService::saveToFs(const char* filePath, const char* value) {
   if (!ensureFsMounted() || filePath == nullptr || value == nullptr) {
     return;
@@ -48,6 +60,9 @@ void OpenWeatherConfigService::saveToFs(const char* filePath, const char* value)
   file.print(value);
 }
 
+/**
+ * Load ZIP/API-key settings from filesystem and mirror into portal fields.
+ */
 void OpenWeatherConfigService::load() {
   if (!loadFromFs(kZipCodeFile, zipCodeValue_, sizeof(zipCodeValue_))) {
     zipCodeValue_[0] = '\0';
@@ -58,12 +73,19 @@ void OpenWeatherConfigService::load() {
   syncPortalValues();
 }
 
+/**
+ * Register ZIP/API-key parameters in WiFiManager setup page.
+ */
 void OpenWeatherConfigService::configurePortal(WiFiManager& manager) {
+  // Ensure current values are shown when user opens /param page.
   syncPortalValues();
   manager.addParameter(&zipCodeParam_);
   manager.addParameter(&apiKeyParam_);
 }
 
+/**
+ * Apply submitted WiFiManager values into memory and persist them.
+ */
 void OpenWeatherConfigService::applyFromConfig() {
   const char* zipParam = zipCodeParam_.getValue();
   if (zipParam != nullptr && zipParam[0] != '\0') {
@@ -82,6 +104,9 @@ void OpenWeatherConfigService::applyFromConfig() {
   syncPortalValues();
 }
 
+/**
+ * Clear in-memory and persisted ZIP/API-key settings.
+ */
 void OpenWeatherConfigService::clearSaved() {
   zipCodeValue_[0] = '\0';
   apiKeyValue_[0] = '\0';
@@ -97,15 +122,25 @@ void OpenWeatherConfigService::clearSaved() {
   }
 }
 
+/**
+ * Return configured ZIP code.
+ */
 const char* OpenWeatherConfigService::zipCode() const {
   return zipCodeValue_;
 }
 
+/**
+ * Return configured OpenWeather API key.
+ */
 const char* OpenWeatherConfigService::apiKey() const {
   return apiKeyValue_;
 }
 
+/**
+ * Push current in-memory values into WiFiManager field defaults.
+ */
 void OpenWeatherConfigService::syncPortalValues() {
+  // Push current values into WiFiManager parameter defaults.
   zipCodeParam_.setValue(zipCodeValue_, static_cast<int>(sizeof(zipCodeValue_)));
   apiKeyParam_.setValue(apiKeyValue_, static_cast<int>(sizeof(apiKeyValue_)));
 }
