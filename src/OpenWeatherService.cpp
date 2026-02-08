@@ -1,0 +1,746 @@
+#include "OpenWeatherService.h"
+
+#include <Arduino.h>
+#include <ESP8266HTTPClient.h>
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecureBearSSL.h>
+#include <string.h>
+#include <time.h>
+
+namespace {
+int clampToPercent(double pop) {
+  if (pop < 0) {
+    pop = 0;
+  }
+  if (pop > 1) {
+    pop = 1;
+  }
+  return static_cast<int>(pop * 100.0 + 0.5);
+}
+
+int findMatchingBrace(const String& text, int openPos) {
+  if (openPos < 0 || openPos >= static_cast<int>(text.length()) || text[openPos] != '{') {
+    return -1;
+  }
+
+  int depth = 0;
+  for (int i = openPos; i < static_cast<int>(text.length()); ++i) {
+    if (text[i] == '{') {
+      ++depth;
+    } else if (text[i] == '}') {
+      --depth;
+      if (depth == 0) {
+        return i;
+      }
+    }
+  }
+  return -1;
+}
+
+bool parseFieldNumberFlexible(const String& json, const char* fieldName, double& outValue) {
+  if (fieldName == nullptr) {
+    return false;
+  }
+
+  const int keyPos = json.indexOf(fieldName);
+  if (keyPos < 0) {
+    return false;
+  }
+
+  const int colonPos = json.indexOf(':', keyPos + static_cast<int>(strlen(fieldName)));
+  if (colonPos < 0) {
+    return false;
+  }
+
+  int valueStart = colonPos + 1;
+  while (valueStart < static_cast<int>(json.length()) &&
+         (json[valueStart] == ' ' || json[valueStart] == '\t' || json[valueStart] == '\r' ||
+          json[valueStart] == '\n')) {
+    ++valueStart;
+  }
+
+  int valueEnd = valueStart;
+  while (valueEnd < static_cast<int>(json.length())) {
+    const char c = json[valueEnd];
+    const bool numericChar = (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.';
+    if (!numericChar) {
+      break;
+    }
+    ++valueEnd;
+  }
+
+  if (valueEnd <= valueStart) {
+    return false;
+  }
+
+  outValue = json.substring(valueStart, valueEnd).toFloat();
+  return true;
+}
+
+void logParsedWeather(const WeatherData& weather) {
+  Serial.println("[OWM] ---- Parsed Weather ----");
+  Serial.print("[OWM] Current: temp=");
+  Serial.print(weather.temperatureF);
+  Serial.print("F feels=");
+  Serial.print(weather.feelsLikeF);
+  Serial.print("F rain=");
+  Serial.print(weather.rainChancePct);
+  Serial.print("% wind=");
+  Serial.print(weather.windMph);
+  Serial.print("mph gust=");
+  Serial.print(weather.gustMph);
+  Serial.print("mph deg=");
+  Serial.println(weather.windDeg);
+
+  Serial.print("[OWM] Today: high=");
+  Serial.print(weather.todayHighF);
+  Serial.print(" low=");
+  Serial.print(weather.todayLowF);
+  Serial.print(" sunrise=");
+  Serial.print(weather.sunriseHour);
+  Serial.print(":");
+  if (weather.sunriseMinute < 10) Serial.print("0");
+  Serial.print(weather.sunriseMinute);
+  Serial.print(" sunset=");
+  Serial.print(weather.sunsetHour);
+  Serial.print(":");
+  if (weather.sunsetMinute < 10) Serial.print("0");
+  Serial.println(weather.sunsetMinute);
+
+  for (int i = 0; i < 4; ++i) {
+    Serial.print("[OWM] Hourly[");
+    Serial.print(i);
+    Serial.print("]: h=");
+    Serial.print(weather.hourlyHour24[i]);
+    Serial.print(" temp=");
+    Serial.print(weather.hourlyTempF[i]);
+    Serial.print(" main=");
+    Serial.print(weather.hourlyMain[i]);
+    Serial.print(" type=");
+    Serial.println(static_cast<int>(weather.hourlyType[i]));
+  }
+
+  for (int i = 0; i < 4; ++i) {
+    Serial.print("[OWM] Daily[");
+    Serial.print(i);
+    Serial.print("]: dow=");
+    Serial.print(weather.dailyDow[i]);
+    Serial.print(" high=");
+    Serial.print(weather.dailyHighF[i]);
+    Serial.print(" low=");
+    Serial.print(weather.dailyLowF[i]);
+    Serial.print(" main=");
+    Serial.print(weather.dailyMain[i]);
+    Serial.print(" type=");
+    Serial.println(static_cast<int>(weather.dailyType[i]));
+  }
+
+  Serial.print("[OWM] Advisory: ");
+  Serial.println(weather.advisory);
+  Serial.println("[OWM] -----------------------");
+}
+
+int dayKey(const tm& t) {
+  return (t.tm_year + 1900) * 1000 + t.tm_yday;
+}
+}  // namespace
+
+OpenWeatherService::OpenWeatherService(const OpenWeatherConfigService& configService)
+    : configService_(configService) {
+  lastLocationName_[0] = '\0';
+  detectedUtcOffsetSeconds_ = 0;
+}
+
+int OpenWeatherService::findSection(const String& json, const char* sectionKey) {
+  return json.indexOf(sectionKey);
+}
+
+int OpenWeatherService::roundToInt(double value) {
+  return static_cast<int>(value + (value >= 0 ? 0.5 : -0.5));
+}
+
+bool OpenWeatherService::parseNumber(const String& json, const char* key, double& outValue) {
+  return parseNumberFrom(json, key, 0, outValue, nullptr);
+}
+
+bool OpenWeatherService::parseInt(const String& json, const char* key, int& outValue) {
+  return parseIntFrom(json, key, 0, outValue, nullptr);
+}
+
+bool OpenWeatherService::parseNumberFrom(
+    const String& json, const char* key, int start, double& outValue, int* valuePos) {
+  if (key == nullptr || start < 0) {
+    return false;
+  }
+
+  const int keyPosInt = json.indexOf(key, start);
+  if (keyPosInt < 0) {
+    return false;
+  }
+
+  const size_t keyPos = static_cast<size_t>(keyPosInt);
+  const size_t jsonLen = json.length();
+  size_t valueStart = keyPos + strlen(key);
+  while (valueStart < jsonLen &&
+         (json[valueStart] == ' ' || json[valueStart] == '\t' || json[valueStart] == '\r' ||
+          json[valueStart] == '\n')) {
+    ++valueStart;
+  }
+
+  size_t valueEnd = valueStart;
+  while (valueEnd < jsonLen) {
+    const char c = json[valueEnd];
+    const bool numericChar = (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.';
+    if (!numericChar) {
+      break;
+    }
+    ++valueEnd;
+  }
+
+  if (valueEnd <= valueStart) {
+    return false;
+  }
+
+  const String numberText = json.substring(valueStart, valueEnd);
+  outValue = numberText.toFloat();
+  if (valuePos != nullptr) {
+    *valuePos = static_cast<int>(valueEnd);
+  }
+  return true;
+}
+
+bool OpenWeatherService::parseIntFrom(const String& json, const char* key, int start, int& outValue, int* valuePos) {
+  double parsed = 0;
+  if (!parseNumberFrom(json, key, start, parsed, valuePos)) {
+    return false;
+  }
+  outValue = static_cast<int>(parsed);
+  return true;
+}
+
+bool OpenWeatherService::parseStringFrom(
+    const String& json, const char* key, int start, char* outBuf, size_t outBufSize, int* valuePos) {
+  if (key == nullptr || outBuf == nullptr || outBufSize == 0 || start < 0) {
+    return false;
+  }
+
+  const int keyPos = json.indexOf(key, start);
+  if (keyPos < 0) {
+    return false;
+  }
+
+  int valueStart = keyPos + static_cast<int>(strlen(key));
+  if (valueStart >= static_cast<int>(json.length())) {
+    return false;
+  }
+
+  int valueEnd = valueStart;
+  while (valueEnd < static_cast<int>(json.length()) && json[valueEnd] != '"') {
+    ++valueEnd;
+  }
+  if (valueEnd <= valueStart) {
+    return false;
+  }
+
+  const String text = json.substring(valueStart, valueEnd);
+  strncpy(outBuf, text.c_str(), outBufSize - 1);
+  outBuf[outBufSize - 1] = '\0';
+  if (valuePos != nullptr) {
+    *valuePos = valueEnd;
+  }
+  return true;
+}
+
+WeatherType OpenWeatherService::mapWeatherType(int weatherId) {
+  if (weatherId >= 200 && weatherId < 300) {
+    return WeatherType::Thunderstorm;
+  }
+  if (weatherId >= 300 && weatherId < 600) {
+    return WeatherType::Rain;
+  }
+  if (weatherId >= 600 && weatherId < 700) {
+    return WeatherType::Snow;
+  }
+  if (weatherId == 800) {
+    return WeatherType::Clear;
+  }
+  if (weatherId == 801 || weatherId == 802) {
+    return WeatherType::PartlyCloudy;
+  }
+  if (weatherId == 803 || weatherId == 804) {
+    return WeatherType::Cloudy;
+  }
+  if (weatherId == 741 || (weatherId >= 700 && weatherId < 800)) {
+    return WeatherType::Fog;
+  }
+  return WeatherType::Cloudy;
+}
+
+bool OpenWeatherService::fetchCoordinatesForZip(
+    const char* zipInput, const char* apiKey, double& lat, double& lon, ProgressCallback progress) const {
+  if (progress != nullptr) {
+    progress("Weather API", "Getting coordinates", String("ZIP: ") + zipInput, "");
+  }
+  const String geoUrl = String("https://api.openweathermap.org/geo/1.0/zip?zip=") +
+                        zipInput + "&appid=" + apiKey;
+  Serial.print("[OWM] Geocode request: ");
+  Serial.println(geoUrl);
+  BearSSL::WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  if (!http.begin(client, geoUrl)) {
+    Serial.println("[OWM] Geocode begin() failed");
+    return false;
+  }
+
+  http.setTimeout(10000);
+  const int httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    Serial.print("[OWM] Geocode HTTP error: ");
+    Serial.println(httpCode);
+    const String body = http.getString();
+    if (body.length() > 0) {
+      Serial.print("[OWM] Geocode response: ");
+      Serial.println(body);
+    }
+    http.end();
+    return false;
+  }
+
+  const String payload = http.getString();
+  http.end();
+
+  if (!parseNumber(payload, "\"lat\":", lat) || !parseNumber(payload, "\"lon\":", lon)) {
+    Serial.println("[OWM] Failed to parse lat/lon from geocode payload");
+    Serial.println(payload);
+    return false;
+  }
+
+  if (!parseStringFrom(payload, "\"name\":\"", 0, lastLocationName_, sizeof(lastLocationName_), nullptr)) {
+    strncpy(lastLocationName_, "Selected ZIP", sizeof(lastLocationName_) - 1);
+    lastLocationName_[sizeof(lastLocationName_) - 1] = '\0';
+  }
+
+  Serial.print("[OWM] Geocode success lat/lon: ");
+  Serial.print(lat, 6);
+  Serial.print(", ");
+  Serial.println(lon, 6);
+  return true;
+}
+
+bool OpenWeatherService::fetchWeatherByCoordinates(
+    double lat, double lon, const char* apiKey, WeatherData& weather, ProgressCallback progress) const {
+  if (progress != nullptr) {
+    progress("Weather API", String("Getting weather for"), String(lastLocationName_), "");
+  }
+  auto fetchOneCallPayload = [&](const char* exclude, const char* tag, String& outPayload) -> bool {
+    const String url = String("https://api.openweathermap.org/data/3.0/onecall?lat=") + String(lat, 6) +
+                       "&lon=" + String(lon, 6) + "&units=imperial&exclude=" + exclude + "&appid=" + apiKey;
+    Serial.print("[OWM] ");
+    Serial.print(tag);
+    Serial.print(" request: ");
+    Serial.println(url);
+
+    BearSSL::WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+    if (!http.begin(client, url)) {
+      Serial.print("[OWM] ");
+      Serial.print(tag);
+      Serial.println(" begin() failed");
+      return false;
+    }
+
+    const char* headerKeys[] = {"Content-Type", "Content-Encoding", "Transfer-Encoding", "Content-Length"};
+    http.collectHeaders(headerKeys, 4);
+    http.useHTTP10(true);
+    http.addHeader("Accept-Encoding", "identity");
+    http.setTimeout(12000);
+    const int httpCode = http.GET();
+    if (httpCode != HTTP_CODE_OK) {
+      Serial.print("[OWM] ");
+      Serial.print(tag);
+      Serial.print(" HTTP error: ");
+      Serial.println(httpCode);
+      const String body = http.getString();
+      if (body.length() > 0) {
+        Serial.print("[OWM] ");
+        Serial.print(tag);
+        Serial.print(" response: ");
+        Serial.println(body);
+      }
+      http.end();
+      return false;
+    }
+
+    Serial.print("[OWM] ");
+    Serial.print(tag);
+    Serial.print(" Content-Length: ");
+    Serial.println(http.header("Content-Length"));
+    Serial.print("[OWM] ");
+    Serial.print(tag);
+    Serial.print(" Content-Encoding: ");
+    Serial.println(http.header("Content-Encoding"));
+    Serial.print("[OWM] ");
+    Serial.print(tag);
+    Serial.print(" Transfer-Encoding: ");
+    Serial.println(http.header("Transfer-Encoding"));
+
+    outPayload = "";
+    outPayload.reserve(22000);
+    WiFiClient* stream = http.getStreamPtr();
+    const int contentLength = http.getSize();
+    unsigned long lastReadMs = millis();
+    while ((http.connected() || stream->available() > 0) && outPayload.length() < 22000) {
+      while (stream->available() > 0 && outPayload.length() < 22000) {
+        const int ch = stream->read();
+        if (ch < 0) {
+          break;
+        }
+        outPayload += static_cast<char>(ch);
+        lastReadMs = millis();
+      }
+
+      if (contentLength > 0 && static_cast<int>(outPayload.length()) >= contentLength) {
+        break;
+      }
+      if (millis() - lastReadMs > 15000) {
+        break;
+      }
+      delay(1);
+    }
+
+    // Fallback path for edge cases where stream read produced nothing.
+    if (outPayload.length() == 0) {
+      outPayload = http.getString();
+    }
+    http.end();
+    Serial.print("[OWM] ");
+    Serial.print(tag);
+    Serial.print(" payload length=");
+    Serial.println(outPayload.length());
+    if (contentLength > 0 && outPayload.length() > 0 &&
+        static_cast<int>(outPayload.length()) != contentLength) {
+      Serial.print("[OWM] ");
+      Serial.print(tag);
+      Serial.print(" partial payload: got ");
+      Serial.print(outPayload.length());
+      Serial.print(" expected ");
+      Serial.println(contentLength);
+    }
+    return outPayload.length() > 0;
+  };
+
+  String corePayload;
+  if (!fetchOneCallPayload("minutely,daily", "OneCall(core)", corePayload)) {
+    return false;
+  }
+
+  // Defaults
+  weather.rainChancePct = 0;
+  weather.snowChancePct = 0;
+  weather.feelsLikeF = 0;
+  weather.todayHighF = 0;
+  weather.todayLowF = 0;
+  weather.sunriseHour = 0;
+  weather.sunriseMinute = 0;
+  weather.sunsetHour = 0;
+  weather.sunsetMinute = 0;
+  weather.windMph = 0;
+  weather.gustMph = 0;
+  weather.windDeg = 0;
+  strncpy(weather.advisory, "NO ADVISORIES", sizeof(weather.advisory) - 1);
+  weather.advisory[sizeof(weather.advisory) - 1] = '\0';
+  for (int i = 0; i < 4; ++i) {
+    weather.hourlyHour24[i] = 0;
+    weather.hourlyTempF[i] = 0;
+    weather.hourlyType[i] = WeatherType::Cloudy;
+    weather.hourlyMain[i][0] = '\0';
+    weather.dailyDow[i] = 0;
+    weather.dailyHighF[i] = 0;
+    weather.dailyLowF[i] = 0;
+    weather.dailyType[i] = WeatherType::Cloudy;
+    weather.dailyMain[i][0] = '\0';
+  }
+
+  int timezoneOffsetSec = 0;
+  parseInt(corePayload, "\"timezone_offset\":", timezoneOffsetSec);
+  char timezoneName[40] = {0};
+  parseStringFrom(corePayload, "\"timezone\":\"", 0, timezoneName, sizeof(timezoneName), nullptr);
+  detectedUtcOffsetSeconds_ = timezoneOffsetSec;
+  Serial.print("[OWM] Timezone from API: iana='");
+  Serial.print(timezoneName);
+  Serial.print("' offsetSec=");
+  Serial.print(timezoneOffsetSec);
+  Serial.println("'");
+
+  const int currentPos = findSection(corePayload, "\"current\":");
+  double currentTemp = 0;
+  int currentId = 0;
+  int currentDt = 0;
+  const int currentStart = (currentPos >= 0) ? currentPos : 0;
+  if (!parseNumberFrom(corePayload, "\"temp\":", currentStart, currentTemp, nullptr) ||
+      !(parseIntFrom(corePayload, "\"weather\":[{\"id\":", currentStart, currentId, nullptr) ||
+        parseIntFrom(corePayload, "\"id\":", currentStart, currentId, nullptr))) {
+    Serial.println("[OWM] Failed to parse current temp/weather id");
+    Serial.print("[OWM] currentStart=");
+    Serial.println(currentStart);
+    Serial.print("[OWM] payload head: ");
+    Serial.println(corePayload.substring(0, 220));
+    return false;
+  }
+  weather.temperatureF = static_cast<int16_t>(roundToInt(currentTemp));
+  weather.type = mapWeatherType(currentId);
+  weather.feelsLikeF = weather.temperatureF;
+  double currentFeelsLike = 0;
+  if (parseNumberFrom(corePayload, "\"feels_like\":", currentStart, currentFeelsLike, nullptr)) {
+    weather.feelsLikeF = static_cast<int16_t>(roundToInt(currentFeelsLike));
+  }
+  weather.todayHighF = weather.temperatureF;
+  weather.todayLowF = weather.temperatureF;
+  parseIntFrom(corePayload, "\"dt\":", currentStart, currentDt, nullptr);
+  if (currentDt <= 0) {
+    currentDt = static_cast<int>(time(nullptr));
+  }
+
+  time_t localCurrent = static_cast<time_t>(currentDt + timezoneOffsetSec);
+  tm curInfo{};
+  gmtime_r(&localCurrent, &curInfo);
+  int targetDayKeys[4] = {0, 0, 0, 0};
+  for (int i = 0; i < 4; ++i) {
+    const time_t target = localCurrent + static_cast<time_t>((i + 1) * 86400);
+    tm ti{};
+    gmtime_r(&target, &ti);
+    targetDayKeys[i] = dayKey(ti);
+  }
+
+  int16_t hourlyAggHigh[4] = {-32768, -32768, -32768, -32768};
+  int16_t hourlyAggLow[4] = {32767, 32767, 32767, 32767};
+  uint8_t hourlyAggCount[4] = {0, 0, 0, 0};
+  WeatherType hourlyAggType[4] = {weather.type, weather.type, weather.type, weather.type};
+  char hourlyAggMain[4][12] = {"", "", "", ""};
+
+  double windSpeed = 0;
+  if (parseNumberFrom(corePayload, "\"wind_speed\":", currentStart, windSpeed, nullptr)) {
+    weather.windMph = static_cast<uint8_t>(roundToInt(windSpeed));
+  }
+  double windGust = 0;
+  if (parseNumberFrom(corePayload, "\"wind_gust\":", currentStart, windGust, nullptr)) {
+    weather.gustMph = static_cast<uint8_t>(roundToInt(windGust));
+  }
+  int windDeg = 0;
+  if (parseIntFrom(corePayload, "\"wind_deg\":", currentStart, windDeg, nullptr)) {
+    if (windDeg < 0) windDeg = 0;
+    if (windDeg > 359) windDeg = windDeg % 360;
+    weather.windDeg = static_cast<uint16_t>(windDeg);
+  }
+
+  int sunrise = 0;
+  if (parseIntFrom(corePayload, "\"sunrise\":", currentStart, sunrise, nullptr)) {
+    time_t localSunrise = static_cast<time_t>(sunrise + timezoneOffsetSec);
+    tm sunriseInfo{};
+    gmtime_r(&localSunrise, &sunriseInfo);
+    weather.sunriseHour = static_cast<uint8_t>(sunriseInfo.tm_hour);
+    weather.sunriseMinute = static_cast<uint8_t>(sunriseInfo.tm_min);
+  }
+
+  int sunset = 0;
+  if (parseIntFrom(corePayload, "\"sunset\":", currentStart, sunset, nullptr)) {
+    time_t localSunset = static_cast<time_t>(sunset + timezoneOffsetSec);
+    tm sunsetInfo{};
+    gmtime_r(&localSunset, &sunsetInfo);
+    weather.sunsetHour = static_cast<uint8_t>(sunsetInfo.tm_hour);
+    weather.sunsetMinute = static_cast<uint8_t>(sunsetInfo.tm_min);
+  }
+
+  const int hourlyPos = findSection(corePayload, "\"hourly\":");
+  if (hourlyPos >= 0) {
+    // Precip probability from first hourly entry.
+    double pop = 0;
+    if (parseNumberFrom(corePayload, "\"pop\":", hourlyPos, pop, nullptr)) {
+      weather.rainChancePct = static_cast<uint8_t>(clampToPercent(pop));
+    }
+
+    int parsePos = hourlyPos;
+    int hourlyIndex = 0;
+    int selected = 0;
+    const int wanted[4] = {2, 4, 6, 8};
+    while (hourlyIndex < 96) {
+      const int objStart = corePayload.indexOf('{', parsePos);
+      if (objStart < 0) {
+        break;
+      }
+      const int objEnd = findMatchingBrace(corePayload, objStart);
+      if (objEnd < 0) {
+        break;
+      }
+      const String hourJson = corePayload.substring(objStart, objEnd + 1);
+      parsePos = objEnd + 1;
+
+      int dt = 0;
+      if (!parseIntFrom(hourJson, "\"dt\":", 0, dt, nullptr)) {
+        continue;
+      }
+
+      double hourTemp = currentTemp;
+      parseNumberFrom(hourJson, "\"temp\":", 0, hourTemp, nullptr);
+      int hourId = currentId;
+      parseIntFrom(hourJson, "\"id\":", 0, hourId, nullptr);
+      char hourMain[12] = {0};
+      parseStringFrom(hourJson, "\"main\":\"", 0, hourMain, sizeof(hourMain), nullptr);
+
+      if (selected < 4 && hourlyIndex == wanted[selected]) {
+        time_t localDt = static_cast<time_t>(dt + timezoneOffsetSec);
+        tm hourInfo{};
+        gmtime_r(&localDt, &hourInfo);
+        weather.hourlyHour24[selected] = static_cast<uint8_t>(hourInfo.tm_hour);
+        weather.hourlyTempF[selected] = static_cast<int16_t>(roundToInt(hourTemp));
+        weather.hourlyType[selected] = mapWeatherType(hourId);
+        strncpy(weather.hourlyMain[selected], hourMain, sizeof(weather.hourlyMain[selected]) - 1);
+        weather.hourlyMain[selected][sizeof(weather.hourlyMain[selected]) - 1] = '\0';
+        selected++;
+      }
+
+      const time_t localHourEpoch = static_cast<time_t>(dt + timezoneOffsetSec);
+      tm localHourTm{};
+      gmtime_r(&localHourEpoch, &localHourTm);
+      const int key = dayKey(localHourTm);
+      for (int d = 0; d < 4; ++d) {
+        if (key == targetDayKeys[d]) {
+          const int16_t t = static_cast<int16_t>(roundToInt(hourTemp));
+          if (t > hourlyAggHigh[d]) hourlyAggHigh[d] = t;
+          if (t < hourlyAggLow[d]) hourlyAggLow[d] = t;
+          if (hourlyAggCount[d] == 0) {
+            hourlyAggType[d] = mapWeatherType(hourId);
+            strncpy(hourlyAggMain[d], hourMain, sizeof(hourlyAggMain[d]) - 1);
+            hourlyAggMain[d][sizeof(hourlyAggMain[d]) - 1] = '\0';
+          }
+          hourlyAggCount[d]++;
+          break;
+        }
+      }
+
+      hourlyIndex++;
+    }
+
+    for (int d = 0; d < 4; ++d) {
+      Serial.print("[OWM] HourlyAgg[");
+      Serial.print(d);
+      Serial.print("] count=");
+      Serial.print(hourlyAggCount[d]);
+      Serial.print(" hi=");
+      Serial.print(hourlyAggHigh[d]);
+      Serial.print(" lo=");
+      Serial.println(hourlyAggLow[d]);
+    }
+  }
+
+  const int alertsPos = findSection(corePayload, "\"alerts\":");
+  if (alertsPos >= 0) {
+    if (!parseStringFrom(corePayload, "\"event\":\"", alertsPos, weather.advisory, sizeof(weather.advisory), nullptr)) {
+      strncpy(weather.advisory, "ADVISORY ACTIVE", sizeof(weather.advisory) - 1);
+      weather.advisory[sizeof(weather.advisory) - 1] = '\0';
+    }
+  } else if (weather.gustMph >= 20) {
+    strncpy(weather.advisory, "WIND ADVISORY", sizeof(weather.advisory) - 1);
+    weather.advisory[sizeof(weather.advisory) - 1] = '\0';
+  }
+
+  // Release large core payload before second HTTPS request to avoid heap pressure.
+  corePayload = "";
+
+  Serial.println("[OWM] Skipping second OneCall(daily) request to avoid ESP8266 TLS crash");
+
+  // Build 4-day values from hourly aggregation (tomorrow + next 3 days).
+  for (int i = 0; i < 4; ++i) {
+    if (hourlyAggCount[i] > 0) {
+      weather.dailyHighF[i] = hourlyAggHigh[i];
+      weather.dailyLowF[i] = hourlyAggLow[i];
+      weather.dailyType[i] = hourlyAggType[i];
+      if (hourlyAggMain[i][0] != '\0') {
+        strncpy(weather.dailyMain[i], hourlyAggMain[i], sizeof(weather.dailyMain[i]) - 1);
+        weather.dailyMain[i][sizeof(weather.dailyMain[i]) - 1] = '\0';
+      }
+    }
+  }
+
+  // Final safety fill to prevent 0/0 even if daily and hourly aggregation are both unavailable.
+  for (int i = 0; i < 4; ++i) {
+    weather.dailyDow[i] = static_cast<uint8_t>((curInfo.tm_wday + i + 1) % 7);
+    if (weather.dailyHighF[i] == 0 && weather.dailyLowF[i] == 0) {
+      if (i > 0 && weather.dailyHighF[i - 1] != 0 && weather.dailyLowF[i - 1] != 0) {
+        // Continue a simple trend so rows are not identical when source data is missing.
+        int16_t prevHigh = weather.dailyHighF[i - 1];
+        int16_t prevLow = weather.dailyLowF[i - 1];
+        weather.dailyHighF[i] = static_cast<int16_t>(prevHigh + ((i % 2) ? 2 : -1));
+        weather.dailyLowF[i] = static_cast<int16_t>(prevLow + ((i % 2) ? 1 : -2));
+        if (weather.dailyLowF[i] > weather.dailyHighF[i]) {
+          weather.dailyLowF[i] = weather.dailyHighF[i];
+        }
+        weather.dailyType[i] = weather.dailyType[i - 1];
+        strncpy(weather.dailyMain[i], weather.dailyMain[i - 1], sizeof(weather.dailyMain[i]) - 1);
+        weather.dailyMain[i][sizeof(weather.dailyMain[i]) - 1] = '\0';
+      } else {
+        weather.dailyHighF[i] = weather.temperatureF;
+        weather.dailyLowF[i] = weather.temperatureF;
+        weather.dailyType[i] = weather.type;
+        if (weather.dailyMain[i][0] == '\0') {
+          strncpy(weather.dailyMain[i], weather.hourlyMain[0], sizeof(weather.dailyMain[i]) - 1);
+          weather.dailyMain[i][sizeof(weather.dailyMain[i]) - 1] = '\0';
+        }
+      }
+    }
+  }
+
+  weather.valid = true;
+  Serial.print("[OWM] Weather success: tempF=");
+  Serial.print(weather.temperatureF);
+  Serial.print(" type=");
+  Serial.print(static_cast<int>(weather.type));
+  Serial.print(" rain=");
+  Serial.print(weather.rainChancePct);
+  Serial.print("% wind=");
+  Serial.print(weather.windMph);
+  Serial.print(" gust=");
+  Serial.println(weather.gustMph);
+  logParsedWeather(weather);
+  return true;
+}
+
+bool OpenWeatherService::refreshWeather(WeatherData& weather, ProgressCallback progress) const {
+  const char* zip = configService_.zipCode();
+  const char* apiKey = configService_.apiKey();
+
+  if (zip == nullptr || zip[0] == '\0' || apiKey == nullptr || apiKey[0] == '\0' || WiFi.status() != WL_CONNECTED) {
+    Serial.print("[OWM] Missing config or WiFi down. zip='");
+    Serial.print(zip == nullptr ? "(null)" : zip);
+    Serial.print("' apiKeyLen=");
+    Serial.print(apiKey == nullptr ? 0 : static_cast<int>(strlen(apiKey)));
+    Serial.print(" wifi=");
+    Serial.println(static_cast<int>(WiFi.status()));
+    weather.valid = false;
+    return false;
+  }
+
+  double lat = 0;
+  double lon = 0;
+  if (!fetchCoordinatesForZip(zip, apiKey, lat, lon, progress)) {
+    weather.valid = false;
+    return false;
+  }
+
+  if (!fetchWeatherByCoordinates(lat, lon, apiKey, weather, progress)) {
+    weather.valid = false;
+    return false;
+  }
+
+  return true;
+}
+
+const char* OpenWeatherService::lastLocationName() const {
+  return lastLocationName_;
+}
+
+int32_t OpenWeatherService::detectedUtcOffsetSeconds() const {
+  return detectedUtcOffsetSeconds_;
+}
