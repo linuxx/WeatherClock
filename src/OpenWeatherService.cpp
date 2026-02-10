@@ -589,17 +589,30 @@ bool OpenWeatherService::fetchWeatherByCoordinates(
 
   const int hourlyPos = findSection(corePayload, "\"hourly\":");
   if (hourlyPos >= 0) {
-      // Precip probability from first hourly entry.
+    // Precip probability from first hourly entry.
     double pop = 0;
     if (parseNumberFrom(corePayload, "\"pop\":", hourlyPos, pop, nullptr)) {
       weather.rainChancePct = static_cast<uint8_t>(clampToPercent(pop));
     }
 
+    // Build hourly targets from the current local hour (rounded down to hh:00),
+    // so rows remain +2h, +4h, +6h, +8h regardless of provider array offsets.
+    time_t targetLocalEpoch[4] = {0, 0, 0, 0};
+    int nextTarget = 0;
+    const time_t utcNow = time(nullptr);
+    if (utcNow >= 8 * 3600 * 2) {
+      const time_t localNow = static_cast<time_t>(utcNow + timezoneOffsetSec);
+      const time_t baseHour = localNow - (localNow % 3600);
+      for (int i = 0; i < 4; ++i) {
+        targetLocalEpoch[i] = baseHour + static_cast<time_t>((i + 1) * 2 * 3600);
+      }
+    }
+
     int parsePos = hourlyPos;
-    int hourlyIndex = 0;
-    int selected = 0;
+    int hourlyIndex = 0;  // Fallback index-based selection if system time is not valid.
+    int selectedFallback = 0;
     const int wanted[4] = {2, 4, 6, 8};
-    while (hourlyIndex < 96) {
+    while (hourlyIndex < 96 && (nextTarget < 4 || selectedFallback < 4)) {
       const int objStart = corePayload.indexOf('{', parsePos);
       if (objStart < 0) {
         break;
@@ -623,16 +636,30 @@ bool OpenWeatherService::fetchWeatherByCoordinates(
       char hourMain[12] = {0};
       parseStringFrom(hourJson, "\"main\":\"", 0, hourMain, sizeof(hourMain), nullptr);
 
-      if (selected < 4 && hourlyIndex == wanted[selected]) {
-        time_t localDt = static_cast<time_t>(dt + timezoneOffsetSec);
+      const time_t localDt = static_cast<time_t>(dt + timezoneOffsetSec);
+      bool selectedThisEntry = false;
+      int targetSlot = -1;
+
+      if (targetLocalEpoch[0] != 0) {
+        if (nextTarget < 4 && localDt >= targetLocalEpoch[nextTarget]) {
+          targetSlot = nextTarget;
+          ++nextTarget;
+          selectedThisEntry = true;
+        }
+      } else if (selectedFallback < 4 && hourlyIndex == wanted[selectedFallback]) {
+        targetSlot = selectedFallback;
+        ++selectedFallback;
+        selectedThisEntry = true;
+      }
+
+      if (selectedThisEntry && targetSlot >= 0 && targetSlot < 4) {
         tm hourInfo{};
         gmtime_r(&localDt, &hourInfo);
-        weather.hourlyHour24[selected] = static_cast<uint8_t>(hourInfo.tm_hour);
-        weather.hourlyTempF[selected] = static_cast<int16_t>(roundToInt(hourTemp));
-        weather.hourlyType[selected] = mapWeatherType(hourId);
-        strncpy(weather.hourlyMain[selected], hourMain, sizeof(weather.hourlyMain[selected]) - 1);
-        weather.hourlyMain[selected][sizeof(weather.hourlyMain[selected]) - 1] = '\0';
-        selected++;
+        weather.hourlyHour24[targetSlot] = static_cast<uint8_t>(hourInfo.tm_hour);
+        weather.hourlyTempF[targetSlot] = static_cast<int16_t>(roundToInt(hourTemp));
+        weather.hourlyType[targetSlot] = mapWeatherType(hourId);
+        strncpy(weather.hourlyMain[targetSlot], hourMain, sizeof(weather.hourlyMain[targetSlot]) - 1);
+        weather.hourlyMain[targetSlot][sizeof(weather.hourlyMain[targetSlot]) - 1] = '\0';
       }
 
       hourlyIndex++;

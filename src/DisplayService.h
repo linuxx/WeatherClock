@@ -102,7 +102,7 @@ class DisplayService {
   /**
    * @brief Draw "Hourly" detail page.
    */
-  void drawHourlyPage(const WeatherData& weather);
+  void drawHourlyPage(const ClockData& clock, const WeatherData& weather);
 
   /**
    * @brief Draw "4-Day" detail page.

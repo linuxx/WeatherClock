@@ -10,7 +10,7 @@
 #include "TimeService.h"
 
 namespace {
-// Display and UI timing constants.
+// Display geometry, GPIO, and UI timing constants used by the app.
 constexpr uint8_t SCREEN_WIDTH = 128;
 constexpr uint8_t SCREEN_HEIGHT = 64;
 constexpr int8_t OLED_RESET = -1;
@@ -20,8 +20,10 @@ constexpr unsigned long RESET_HOLD_WINDOW_MS = 5000;
 constexpr uint8_t TOTAL_PAGES = 6;  // 0=Home, 1..5 detail pages
 constexpr unsigned long PAGE_AUTO_RETURN_MS = 10000;
 constexpr unsigned long PAGE_BUTTON_DEBOUNCE_MS = 35;
+// WiFiManager menu order: include weather params page.
 const char* WIFI_MENU_WITH_SETTINGS[] = {"wifi", "param", "info", "exit"};
 
+// Core services and shared runtime state.
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 DisplayService displayService(display);
 TimeService timeService;
@@ -36,6 +38,7 @@ bool webPortalRunning = false;
 bool pendingConfigSync = false;
 DisplayService* configPortalDisplay = nullptr;
 
+// App data models with sensible placeholder defaults until first sync.
 ClockData clockData{12, 0, 1, 1, false};
 WeatherData currentWeather{
     67, 67, 0, 0, WeatherType::PartlyCloudy,
@@ -64,6 +67,7 @@ bool performHourlySync();
 void showSyncStatus(const char* title, const String& line1, const String& line2, const String& line3);
 
 void onParamsSaved() {
+  // Persisted config changed in portal: reload values and refresh data.
   Serial.println("[CFG] Params saved from portal");
   openWeatherConfigService.applyFromConfig();
   Serial.print("[CFG] ZIP='");
@@ -94,6 +98,7 @@ bool shouldEnterFactoryResetFromButton() {
 
   const unsigned long start = millis();
   int lastShownSeconds = -1;
+  // Show live countdown during the reset hold window.
   while (millis() - start < RESET_HOLD_WINDOW_MS) {
     const unsigned long elapsedMs = millis() - start;
     const int secondsRemaining = static_cast<int>((RESET_HOLD_WINDOW_MS - elapsedMs + 999) / 1000);
@@ -111,6 +116,7 @@ bool shouldEnterFactoryResetFromButton() {
     }
 
     if (digitalRead(RESET_BUTTON_PIN) == LOW) {
+      // Small debounce before confirming the press.
       delay(30);
       if (digitalRead(RESET_BUTTON_PIN) == LOW) {
         return true;
@@ -137,6 +143,7 @@ bool performHourlySync() {
     currentWeather.valid = false;
     Serial.println("[SYNC] Weather refresh failed");
   } else {
+    // Weather API also provides timezone offset for the selected location.
     const int32_t offset = openWeatherService.detectedUtcOffsetSeconds();
     Serial.print("[SYNC] Applying API timezone offset: ");
     Serial.println(offset);
@@ -153,6 +160,7 @@ bool performHourlySync() {
 }
 
 void showSyncStatus(const char* title, const String& line1, const String& line2, const String& line3) {
+  // Thin wrapper to match the callback signature expected by weather service.
   displayService.drawStatusScreen(title, line1, line2, line3);
 }
 
@@ -164,6 +172,7 @@ bool handlePageButtonClick(unsigned long now, uint8_t& pageIndex, unsigned long&
 
   const int rawState = digitalRead(RESET_BUTTON_PIN);
   if (rawState != lastRawState) {
+    // Raw level changed, restart debounce timer.
     lastDebounceMs = now;
     lastRawState = rawState;
   }
@@ -175,6 +184,7 @@ bool handlePageButtonClick(unsigned long now, uint8_t& pageIndex, unsigned long&
   if (stableState != rawState) {
     stableState = rawState;
     if (stableState == LOW) {
+      // Advance through available pages and remember user interaction time.
       pageIndex = static_cast<uint8_t>((pageIndex + 1) % TOTAL_PAGES);
       lastPageInteractionMs = now;
       Serial.print("[UI] Button click -> page ");
@@ -188,6 +198,7 @@ bool handlePageButtonClick(unsigned long now, uint8_t& pageIndex, unsigned long&
 
 void onConfigPortalStart(WiFiManager* wm) {
   (void)wm;
+  // Mirror AP portal info to OLED so setup can be done without serial monitor.
   if (configPortalDisplay != nullptr) {
     configPortalDisplay->drawStatusScreen(
         "WiFi Setup",
@@ -199,11 +210,13 @@ void onConfigPortalStart(WiFiManager* wm) {
 }  // namespace
 
 void setup() {
+  // Serial logging for boot diagnostics.
   Serial.begin(115200);
   delay(50);
   Serial.println();
   Serial.println("[BOOT] WeatherClock starting");
 
+  // Initialize OLED early so boot/setup status can be shown to the user.
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     for (;;) {
       delay(1000);
@@ -223,6 +236,7 @@ void setup() {
   openWeatherConfigService.load();
   openWeatherConfigService.configurePortal(wifiManager);
 
+  // Configure WiFiManager for station auto-connect plus non-blocking web portal.
   wifiManager.setAPCallback(onConfigPortalStart);
   wifiManager.setSaveParamsCallback(onParamsSaved);
   wifiManager.setParamsPage(false);
@@ -234,11 +248,13 @@ void setup() {
 
   bool connected = false;
   if (shouldEnterFactoryResetFromButton()) {
+    // Factory-reset path: clear saved settings and open config portal.
     Serial.println("[BOOT] Reset button pressed, entering config portal");
     displayService.drawStatusScreen("Reset", "Clearing WiFi + app cfg", "Starting config", portalSsid);
     clearSavedAppSettings();
     connected = wifiManager.startConfigPortal(portalSsid.c_str());
   } else {
+    // Normal boot path: try saved credentials first.
     Serial.println("[BOOT] Attempting autoConnect");
     displayService.drawStatusScreen("WiFi", "Trying saved network...", deviceName, "");
     connected = wifiManager.autoConnect(portalSsid.c_str());
@@ -258,6 +274,7 @@ void setup() {
   openWeatherConfigService.applyFromConfig();
   timeService.refreshClockData(clockData);
 
+  // Brief post-connect confirmation.
   displayService.drawStatusScreen(
       "WiFi Connected",
       deviceName,
@@ -265,6 +282,7 @@ void setup() {
       WiFi.localIP().toString());
   delay(800);
 
+  // Initial full sync: NTP then weather.
   displayService.drawStatusScreen(
       "Time",
       "Syncing NTP...",
@@ -281,6 +299,7 @@ void setup() {
   if (!weatherUpdated) {
     currentWeather.valid = false;
   } else {
+    // Override timezone with API-provided offset tied to configured location.
     const int32_t offset = openWeatherService.detectedUtcOffsetSeconds();
     Serial.print("[BOOT] Applying API timezone offset: ");
     Serial.println(offset);
@@ -294,6 +313,7 @@ void setup() {
   wifiManager.startWebPortal();
   webPortalRunning = true;
 
+  // Draw initial frame after setup/sync phase.
   displayService.drawLayoutFrame(clockData, currentWeather, true);
 }
 
@@ -309,6 +329,7 @@ void loop() {
   static unsigned long lastPageInteractionMs = 0;
   const unsigned long now = millis();
 
+  // Refresh clock snapshot once per second.
   if (now - lastClockRefreshMs >= 1000) {
     lastClockRefreshMs = now;
     if (!timeService.refreshClockData(clockData)) {
@@ -316,12 +337,14 @@ void loop() {
     }
   }
 
+  // Blink colon in clock view.
   if (now - lastBlinkToggleMs >= 500) {
     lastBlinkToggleMs = now;
     showColon = !showColon;
   }
 
   if (clockData.valid) {
+    // One-shot trigger at minute 00 for each distinct hour key.
     const long hourlySyncKey =
         static_cast<long>(clockData.month) * 100000L + static_cast<long>(clockData.day) * 1000L + clockData.hour;
     if (clockData.minute == 0 && hourlySyncKey != lastHourlySyncKey) {
@@ -337,25 +360,30 @@ void loop() {
   }
 
   if (networkBusy && now - lastNetworkAnimMs >= 250) {
+    // Advance lightweight network activity animation.
     lastNetworkAnimMs = now;
     networkAnimFrame++;
   }
 
   if (webPortalRunning) {
+    // Service WiFiManager HTTP handlers in non-blocking mode.
     wifiManager.process();
   }
 
+  // Single button rotates pages; inactive detail page auto-returns to home.
   handlePageButtonClick(now, currentPage, lastPageInteractionMs);
   if (currentPage != 0 && now - lastPageInteractionMs >= PAGE_AUTO_RETURN_MS) {
     currentPage = 0;
   }
 
   if (pendingConfigSync && WiFi.status() == WL_CONNECTED) {
+    // Apply delayed sync after portal save when WiFi is available again.
     Serial.println("[CFG] Processing queued sync");
     pendingConfigSync = false;
     performHourlySync();
   }
 
+  // Render current page with latest data and activity indicator.
   displayService.setNetworkActivity(networkBusy, networkAnimFrame);
   displayService.drawPage(currentPage, clockData, currentWeather, showColon);
 }

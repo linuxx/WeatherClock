@@ -31,35 +31,11 @@ String DisplayService::formatHourLabel(uint8_t hour24) {
 }
 
 namespace {
-// Current local hour from system clock (already adjusted via UTC offset in TimeService).
-uint8_t currentLocalHour24() {
-  time_t now = time(nullptr);
-  tm localNow{};
-  localtime_r(&now, &localNow);
-  return static_cast<uint8_t>(localNow.tm_hour);
-}
-
 uint8_t currentLocalWday() {
   time_t now = time(nullptr);
   tm localNow{};
   localtime_r(&now, &localNow);
   return static_cast<uint8_t>(localNow.tm_wday);
-}
-
-// Picks which precomputed hourly slot is nearest to "now + 2h".
-uint8_t pickHourlyStartIndex(const WeatherData& weather) {
-  const uint8_t targetHour = static_cast<uint8_t>((currentLocalHour24() + 2) % 24);
-  uint8_t bestIndex = 0;
-  uint8_t bestDelta = 24;
-  for (uint8_t i = 0; i < 4; ++i) {
-    const uint8_t slotHour = weather.hourlyHour24[i] % 24;
-    const uint8_t delta = static_cast<uint8_t>((slotHour + 24 - targetHour) % 24);
-    if (delta < bestDelta) {
-      bestDelta = delta;
-      bestIndex = i;
-    }
-  }
-  return bestIndex;
 }
 
 // Picks daily slot that matches tomorrow's weekday.
@@ -152,7 +128,7 @@ void DisplayService::drawPage(uint8_t pageIndex, const ClockData& clock, const W
     case 2:
       display_.setCursor(0, 4);
       display_.print("Hourly");
-      drawHourlyPage(weather);
+      drawHourlyPage(clock, weather);
       break;
     case 3:
       display_.setCursor(0, 4);
@@ -309,12 +285,12 @@ void DisplayService::drawTodayPage(const WeatherData& weather) {
   display_.print(" mph");
 }
 
-void DisplayService::drawHourlyPage(const WeatherData& weather) {
+void DisplayService::drawHourlyPage(const ClockData& clock, const WeatherData& weather) {
+  (void)clock;
   display_.setTextSize(1);
-  // Rotates rows so first entry starts at +2h from current local time.
-  const uint8_t start = pickHourlyStartIndex(weather);
+  // Hourly rows are preselected in parser order (+2h, +4h, +6h, +8h).
   for (int i = 0; i < 4; ++i) {
-    const uint8_t idx = static_cast<uint8_t>((start + i) % 4);
+    const uint8_t idx = static_cast<uint8_t>(i);
     const int16_t y = 20 + i * 11;
     display_.setCursor(0, y);
     display_.print(formatHourLabel(weather.hourlyHour24[idx]));
