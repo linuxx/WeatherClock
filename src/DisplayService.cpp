@@ -55,6 +55,10 @@ void DisplayService::setNetworkActivity(bool active, uint8_t frame) {
   networkAnimFrame_ = frame;
 }
 
+void DisplayService::setLocalIp(const String& ip) {
+  localIp_ = ip;
+}
+
 void DisplayService::drawBootScreen() {
   display_.clearDisplay();
   display_.setTextColor(SSD1306_WHITE);
@@ -115,6 +119,8 @@ void DisplayService::drawPage(uint8_t pageIndex, const ClockData& clock, const W
     display_.print("Weather Pages");
     display_.setCursor(0, 28);
     display_.print("API ERROR");
+    display_.setCursor(0, 52);
+    display_.print(localIp_.length() ? localIp_ : "IP N/A");
     display_.display();
     return;
   }
@@ -228,6 +234,8 @@ void DisplayService::drawBottomBand(const WeatherData& weather) {
     display_.setTextSize(1);
     display_.setCursor(44, y0 + 16);
     display_.print("API ERROR");
+    display_.setCursor(40, y0 + 30);
+    display_.print(localIp_.length() ? localIp_ : "IP N/A");
     return;
   }
 

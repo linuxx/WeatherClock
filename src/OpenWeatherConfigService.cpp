@@ -1,5 +1,6 @@
 #include "OpenWeatherConfigService.h"
 
+#include <Arduino.h>
 #include <string.h>
 
 /**
@@ -21,7 +22,11 @@ bool OpenWeatherConfigService::ensureFsMounted() {
   if (fsMounted_) {
     return true;
   }
-  fsMounted_ = LittleFS.begin();
+  // Format-on-fail prevents "works until reboot" behavior on uninitialized FS.
+  fsMounted_ = LittleFS.begin(true);
+  if (!fsMounted_) {
+    Serial.println("[CFG] LittleFS mount failed");
+  }
   return fsMounted_;
 }
 
@@ -39,6 +44,7 @@ bool OpenWeatherConfigService::loadFromFs(const char* filePath, char* output, si
   }
 
   String value = file.readStringUntil('\n');
+  file.close();
   value.trim();
   strncpy(output, value.c_str(), outputSize - 1);
   output[outputSize - 1] = '\0';
@@ -55,9 +61,13 @@ void OpenWeatherConfigService::saveToFs(const char* filePath, const char* value)
 
   File file = LittleFS.open(filePath, "w");
   if (!file) {
+    Serial.print("[CFG] Failed to open file for write: ");
+    Serial.println(filePath);
     return;
   }
   file.print(value);
+  file.flush();
+  file.close();
 }
 
 /**

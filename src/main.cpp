@@ -1,7 +1,13 @@
 #include <Arduino.h>
 #include <string.h>
 #include <Wire.h>
+#if defined(ARDUINO_ARCH_ESP8266)
 #include <ESP8266WiFi.h>
+#elif defined(ARDUINO_ARCH_ESP32)
+#include <WiFi.h>
+#else
+#error Unsupported architecture: expected ESP8266 or ESP32
+#endif
 #include <WiFiManager.h>
 #include <Adafruit_SSD1306.h>
 #include "DisplayService.h"
@@ -15,7 +21,11 @@ constexpr uint8_t SCREEN_WIDTH = 128;
 constexpr uint8_t SCREEN_HEIGHT = 64;
 constexpr int8_t OLED_RESET = -1;
 constexpr uint8_t OLED_ADDR = 0x3C;
+#if defined(ARDUINO_ARCH_ESP8266)
 constexpr uint8_t RESET_BUTTON_PIN = D5;
+#else
+constexpr uint8_t RESET_BUTTON_PIN = 5;
+#endif
 constexpr unsigned long RESET_HOLD_WINDOW_MS = 5000;
 constexpr uint8_t TOTAL_PAGES = 6;  // 0=Home, 1..5 detail pages
 constexpr unsigned long PAGE_AUTO_RETURN_MS = 10000;
@@ -39,20 +49,8 @@ bool pendingConfigSync = false;
 DisplayService* configPortalDisplay = nullptr;
 
 // App data models with sensible placeholder defaults until first sync.
-ClockData clockData{12, 0, 1, 1, false};
-WeatherData currentWeather{
-    67, 67, 0, 0, WeatherType::PartlyCloudy,
-    67, 45, 7, 0, 17, 0, 0, 0, 0, "NO ADVISORIES",
-    {12, 14, 16, 18},
-    {67, 68, 69, 68},
-    {WeatherType::PartlyCloudy, WeatherType::Cloudy, WeatherType::Cloudy, WeatherType::PartlyCloudy},
-    {"Clouds", "Clouds", "Clouds", "Clouds"},
-    {1, 2, 3, 4},
-    {67, 68, 69, 70},
-    {45, 46, 47, 48},
-    {WeatherType::Cloudy, WeatherType::Clear, WeatherType::PartlyCloudy, WeatherType::Cloudy},
-    {"Clouds", "Clear", "Clouds", "Clouds"},
-    false};
+ClockData clockData{};
+WeatherData currentWeather{};
 
 String buildDeviceName() {
   // Use last 2 MAC bytes for a short unique suffix.
@@ -254,9 +252,9 @@ void setup() {
     clearSavedAppSettings();
     connected = wifiManager.startConfigPortal(portalSsid.c_str());
   } else {
-    // Normal boot path: try saved credentials first.
+    // Normal boot path: try saved credentials and show first-time setup guidance.
     Serial.println("[BOOT] Attempting autoConnect");
-    displayService.drawStatusScreen("WiFi", "Trying saved network...", deviceName, "");
+    displayService.drawStatusScreen("WiFi", "Trying saved network...", String("If needed: ") + portalSsid, "Open 192.168.4.1");
     connected = wifiManager.autoConnect(portalSsid.c_str());
   }
 
@@ -270,6 +268,7 @@ void setup() {
   Serial.print(WiFi.SSID());
   Serial.print(" IP=");
   Serial.println(WiFi.localIP());
+  displayService.setLocalIp(WiFi.localIP().toString());
 
   openWeatherConfigService.applyFromConfig();
   timeService.refreshClockData(clockData);

@@ -1,9 +1,19 @@
 #include "OpenWeatherService.h"
 
 #include <Arduino.h>
+#if defined(ARDUINO_ARCH_ESP8266)
 #include <ESP8266HTTPClient.h>
 #include <ESP8266WiFi.h>
 #include <WiFiClientSecureBearSSL.h>
+using SecureClient = BearSSL::WiFiClientSecure;
+#elif defined(ARDUINO_ARCH_ESP32)
+#include <HTTPClient.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+using SecureClient = WiFiClientSecure;
+#else
+#error Unsupported architecture: expected ESP8266 or ESP32
+#endif
 #include <string.h>
 #include <time.h>
 
@@ -316,7 +326,7 @@ bool OpenWeatherService::fetchCoordinatesForZip(
                         zipInput + "&appid=" + apiKey;
   Serial.print("[OWM] Geocode request: ");
   Serial.println(geoUrl);
-  BearSSL::WiFiClientSecure client;
+  SecureClient client;
   client.setInsecure();
   HTTPClient http;
   if (!http.begin(client, geoUrl)) {
@@ -377,10 +387,12 @@ bool OpenWeatherService::fetchWeatherByCoordinates(
       Serial.print("): ");
       Serial.println(url);
 
-      BearSSL::WiFiClientSecure client;
+      SecureClient client;
       client.setInsecure();
       // Larger RX buffer helps prevent truncated reads on larger payloads.
+#if defined(ARDUINO_ARCH_ESP8266)
       client.setBufferSizes(4096, 1024);
+#endif
 
       HTTPClient http;
       if (!http.begin(client, url)) {

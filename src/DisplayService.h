@@ -25,6 +25,12 @@ class DisplayService {
   void setNetworkActivity(bool active, uint8_t frame);
 
   /**
+   * @brief Set local IP text used on error screens.
+   * @param ip Local IP string (e.g. 192.168.1.42).
+   */
+  void setLocalIp(const String& ip);
+
+  /**
    * @brief Draw the boot splash screen.
    */
   void drawBootScreen();
@@ -122,4 +128,5 @@ class DisplayService {
   Adafruit_SSD1306& display_;
   bool networkBusy_ = false;
   uint8_t networkAnimFrame_ = 0;
+  String localIp_;
 };
